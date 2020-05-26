@@ -331,6 +331,12 @@ std::shared_ptr<FutureMessage> TensorPipeAgent::send(
   requestMessage.setId(nextMessageID_++);
   pendingResponseMessage[requestMessage.id()] = futureResponseMessage;
 
+  futureResponseMessage->futMsg.addCallback([this]() {
+    TORCH_INTERNAL_ASSERT(
+        this->threadPool_.inThreadPool(),
+        "Future marked complete from outside the thread pool");
+  });
+
   ++clientActiveCalls_;
   // Use the default RPC timeout if no timeout is specified for this send call
   auto timeout = rpcTimeoutSeconds == kUnsetRpcTimeout
@@ -413,22 +419,17 @@ std::shared_ptr<FutureMessage> TensorPipeAgent::send(
                 clientPipe.pendingResponseMessage_.erase(it);
               }
 
-              threadPool_.run(
-                  [this,
-                   futureResponseMessage,
-                   responseMessage{std::move(responseMessage)}]() mutable {
-                    if (responseMessage.type() == MessageType::EXCEPTION) {
-                      markFutureWithError(
-                          std::move(futureResponseMessage),
-                          std::string(
-                              responseMessage.payload().begin(),
-                              responseMessage.payload().end()));
-                    } else {
-                      markFutureAsComplete(
-                          std::move(futureResponseMessage),
-                          std::move(responseMessage));
-                    }
-                  });
+              if (responseMessage.type() == MessageType::EXCEPTION) {
+                markFutureWithError(
+                    std::move(futureResponseMessage),
+                    std::string(
+                        responseMessage.payload().begin(),
+                        responseMessage.payload().end()));
+              } else {
+                markFutureAsComplete(
+                    std::move(futureResponseMessage),
+                    std::move(responseMessage));
+              }
             });
       });
 
@@ -670,7 +671,13 @@ void TensorPipeAgent::markFutureAsComplete(
     std::shared_ptr<AtomicFutureMessage> futureMessage,
     Message message) {
   if (!futureMessage->isComplete.test_and_set()) {
-    futureMessage->futMsg.markCompleted(std::move(message));
+    // Completing the future will run its callbacks, which could execute
+    // arbitrary user code. To prevent blocking or stalling the TensorPipe event
+    // loops, we defer this to a worker thread.
+    threadPool_.run([futureMessage{std::move(futureMessage)},
+                     message{std::move(message)}]() mutable {
+      futureMessage->futMsg.markCompleted(std::move(message));
+    });
   }
 }
 
@@ -678,7 +685,13 @@ void TensorPipeAgent::markFutureWithError(
     std::shared_ptr<AtomicFutureMessage> futureMessage,
     std::string errorMsg) {
   if (!futureMessage->isComplete.test_and_set()) {
-    futureMessage->futMsg.setError(std::move(errorMsg));
+    // Completing the future will run its callbacks, which could execute
+    // arbitrary user code. To prevent blocking or stalling the TensorPipe event
+    // loops, we defer this to a worker thread.
+    threadPool_.run([futureMessage{std::move(futureMessage)},
+                     errorMsg{std::move(errorMsg)}]() mutable {
+      futureMessage->futMsg.setError(std::move(errorMsg));
+    });
   }
 }
 
