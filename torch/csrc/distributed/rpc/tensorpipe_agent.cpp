@@ -522,6 +522,10 @@ void TensorPipeAgent::join() {
 }
 
 void TensorPipeAgent::shutdownImpl() {
+  // This will close all the pipes and listeners, invoke all callbacks with
+  // errors, turn down the I/O event loops and wait for everything to terminate.
+  context_->join();
+
   threadPool_.waitWorkComplete();
 
   // Join the Timeout Thread
@@ -529,10 +533,6 @@ void TensorPipeAgent::shutdownImpl() {
   if (timeoutThread_.joinable()) {
     timeoutThread_.join();
   }
-  // TODO: context_->join() is not absolutely ready yet.
-  // NOTE: context_->join() will wait for available RPC message to be
-  //       read or written, and wait for the remaining unavailable ones
-  //       to be called with error by invoking callbacks.
 }
 
 const WorkerInfo& TensorPipeAgent::getWorkerInfo(
